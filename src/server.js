@@ -2,6 +2,7 @@ import express from "express";
 import crypto from "node:crypto";
 import dotenv from "dotenv";
 import { pool } from "./db.js";
+import { requireAuth } from "./auth.js";
 import {
   openai,
   chunkText,
@@ -61,7 +62,7 @@ async function getQueryEmbedding(question) {
 /* ================================================================== */
 /* 1) INGEST — single round-trip bulk insert via UNNEST                */
 /* ================================================================== */
-app.post("/api/documents", async (req, res) => {
+app.post("/api/documents", requireAuth("rag:write"), async (req, res) => {
   const { title = null, source = null, text, metadata = {} } = req.body || {};
   if (!text || typeof text !== "string") {
     return res.status(400).json({ error: "Field 'text' (string) is required" });
@@ -113,7 +114,7 @@ app.post("/api/documents", async (req, res) => {
   }
 });
 
-app.get("/api/documents", async (_req, res) => {
+app.get("/api/documents", requireAuth("rag:read"), async (_req, res) => {
   const { rows } = await pool.query(`
     SELECT d.id, d.title, d.source, d.created_at, COUNT(c.id)::int AS chunks
     FROM documents d
@@ -124,7 +125,7 @@ app.get("/api/documents", async (_req, res) => {
   res.json(rows);
 });
 
-app.delete("/api/documents/:id", async (req, res) => {
+app.delete("/api/documents/:id", requireAuth("rag:write"), async (req, res) => {
   const { rowCount } = await pool.query(`DELETE FROM documents WHERE id = $1`, [
     req.params.id,
   ]);
@@ -224,7 +225,7 @@ async function twoStageSearch(client, qLiteral, topK, documentId) {
 /* 2) RAG query                                                        */
 /* mode: "hybrid" (default) | "twostage" | "semantic"                  */
 /* ================================================================== */
-app.post("/api/query", async (req, res) => {
+app.post("/api/query", requireAuth("rag:read"), async (req, res) => {
   const {
     question,
     topK = TOP_K,
@@ -342,7 +343,7 @@ app.post("/api/query", async (req, res) => {
 /* ================================================================== */
 /* Ops: index/table sizes, cache stats, vacuum state                   */
 /* ================================================================== */
-app.get("/api/stats", async (_req, res) => {
+app.get("/api/stats", requireAuth("rag:read"), async (_req, res) => {
   const [sizes, cache, tuples] = await Promise.all([
     pool.query(`
       SELECT indexrelname AS index,
