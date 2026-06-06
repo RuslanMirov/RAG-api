@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
-import { checkAdminSecret, ragFetch } from "@/lib/rag";
+import { checkAdminSecret } from "@/lib/auth";
+import { listDocuments, deleteDocument } from "@/lib/rag";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(req) {
   if (!checkAdminSecret(req.headers.get("x-admin-key"))) {
     return NextResponse.json({ error: "Invalid admin key" }, { status: 401 });
   }
-  const { status, data } = await ragFetch("/api/documents", {
-    scope: "rag:read",
-  });
-  return NextResponse.json(data, { status });
+  return NextResponse.json(await listDocuments());
 }
 
 export async function DELETE(req) {
@@ -19,9 +20,7 @@ export async function DELETE(req) {
   const id = searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
-  const { status, data } = await ragFetch(`/api/documents/${id}`, {
-    method: "DELETE",
-    scope: "rag:write",
-  });
-  return NextResponse.json(data, { status });
+  const ok = await deleteDocument(id);
+  if (!ok) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json({ deleted: true });
 }

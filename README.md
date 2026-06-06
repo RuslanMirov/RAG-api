@@ -1,127 +1,77 @@
-# pgvector RAG API — Optimized
+# pgvector RAG — Unified Next.js App
 
-Node.js + Express + PostgreSQL (**pgvector ≥ 0.7**) + OpenAI, tuned with advanced Postgres features.
+Single Next.js application: **UI + full RAG API in one process**. No separate Express service.
 
-## Optimization summary
+```
+app/
+  page.jsx                      # Chat UI (RAG, mode switcher, sources, stats)
+  admin/page.jsx                # Admin panel (secret-key gated ingest + doc management)
+  api/
+    query/route.js              # EXTERNAL: POST RAG answer        [JWT rag:read]
+    documents/route.js          # EXTERNAL: POST ingest, GET list  [JWT rag:write / rag:read]
+    documents/[id]/route.js     # EXTERNAL: DELETE                 [JWT rag:write]
+    stats/route.js              # EXTERNAL: index/cache/vacuum     [JWT rag:read]
+    chat/route.js               # INTERNAL: UI chat (same-origin)
+    admin/ingest/route.js       # INTERNAL: admin add data         [x-admin-key]
+    admin/documents/route.js    # INTERNAL: admin list/delete      [x-admin-key]
+lib/
+  rag.js                        # service layer: ingest, hybrid/twostage/semantic retrieval,
+                                #   RRF fusion, query-embedding cache, answer generation
+  auth.js                       # JWT verify (alg pinned), timing-safe admin key, token mint
+  db.js                         # pg pool singleton (survives Next dev hot-reload)
+  embeddings.js                 # chunking + batched OpenAI embeddings
+scripts/
+  initDb.mjs                    # optimized schema: halfvec HNSW, bit HNSW, GIN FTS,
+                                #   generated columns, autovacuum/storage tuning
+  issueToken.mjs                # mint JWTs for external API consumers
+```
 
-| Layer | Technique | Win |
-|---|---|---|
-| Storage | `halfvec` expression HNSW index | ~50% smaller index, faster build/scan, ~no recall loss |
-| Storage | `bit(N)` binary quantization (GENERATED column) | 192 bytes vs 6 KB per vector for coarse search |
-| Storage | `SET STORAGE EXTERNAL` on embedding | skips TOAST compression CPU on every read |
-| Retrieval | **Hybrid search**: HNSW + GIN FTS fused via **RRF** | catches names/exact terms embeddings miss |
-| Retrieval | **Two-stage**: Hamming prefilter (10x oversample) → exact cosine re-rank | scales to millions of chunks |
-| Retrieval | `SET LOCAL hnsw.ef_search` + `hnsw.iterative_scan = relaxed_order` | per-query recall knob; filtered queries fill LIMIT |
-| Ingest | Single `INSERT ... SELECT FROM UNNEST(arrays)` | 1 round trip for N chunks instead of N |
-| Caching | `query_cache` table (sha256 → vector, hit counters) | repeated questions skip the OpenAI embeddings call |
-| Maintenance | aggressive autovacuum scale factors, `fillfactor=90`, column statistics 500 | HNSW scans avoid dead tuples; better plans |
-| Index build | `maintenance_work_mem=512MB`, parallel maintenance workers | much faster HNSW creation |
-| FTS | `GENERATED ALWAYS AS to_tsvector(...)` + GIN + `websearch_to_tsquery` | zero-maintenance lexical leg |
+## Postgres optimizations (unchanged from v2)
+
+halfvec expression HNSW (~50% smaller index) · binary quantization `bit(N)` GENERATED column + Hamming HNSW for two-stage retrieval · generated tsvector + GIN for the hybrid-search lexical leg · RRF fusion · `SET LOCAL hnsw.ef_search` + `iterative_scan=relaxed_order` per query · UNNEST single-round-trip bulk insert · query-embedding cache table · `STORAGE EXTERNAL` on vectors · aggressive autovacuum + fillfactor 90.
 
 ## Setup
 
 ```bash
 docker run -d --name ragdb -p 5432:5432 \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=ragdb \
-  pgvector/pgvector:pg16
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=ragdb pgvector/pgvector:pg16
 
 npm install
-cp .env.example .env   # set OPENAI_API_KEY
+cp .env.example .env      # set OPENAI_API_KEY, JWT_SECRET, ADMIN_SECRET
 npm run db:init
-npm start
+npm run dev               # http://localhost:3000
 ```
 
-## API
+- `/` — chat with the knowledge base
+- `/admin` — enter ADMIN_SECRET, add documents, manage the corpus
 
-### POST /api/documents — ingest (UNNEST bulk insert)
+## Security model
 
-```bash
-curl -X POST localhost:3000/api/documents -H "Content-Type: application/json" \
-  -d '{"title":"Matheism Intro","text":"All existence is patterned or random...","metadata":{"lang":"en"}}'
-```
+Two independent gates, both server-side:
 
-### POST /api/query — RAG answer
+1. **External API** (`/api/query`, `/api/documents`, `/api/stats`) — Bearer JWT.
+   Algorithm pinned (HS256 or RS256 via env), `iss`/`aud`/`exp` enforced,
+   scopes `rag:read` / `rag:write`. 401 invalid token, 403 wrong scope.
+   Mint: `npm run token -- svc "rag:read rag:write" 24h`
 
-```bash
-curl -X POST localhost:3000/api/query -H "Content-Type: application/json" \
-  -d '{"question":"What is the core claim?","mode":"hybrid"}'
-```
+2. **Admin panel** — `x-admin-key` header checked with `crypto.timingSafeEqual`
+   against **ADMIN_SECRET in .env**. Rotate by changing the env value and
+   restarting; nothing is stored in the browser or DB. UI routes call the
+   service layer directly — no internal HTTP hop, no token in the page.
 
-`mode`:
-- `hybrid` (default) — semantic + full-text, RRF fusion. Best answer quality.
-- `twostage` — binary Hamming prefilter → exact re-rank. Best at large scale.
-- `semantic` — pure halfvec HNSW. Fastest single-leg.
+Verified live: no/garbage/expired token → 401; read-scope on write route → 403;
+valid scope → passes to body validation; wrong admin key → 401; correct key → gate opens.
 
-Response includes `stats`: `{ mode, retrievalMs, totalMs, embeddingCached }` and per-source `similarity` / `rrfScore`.
-
-### GET /api/stats — ops visibility
-
-Index sizes + scan counts, query-cache hit totals, live/dead tuples, last autovacuum.
-
-## Tuning notes
-
-- **`hnsw.ef_search`** (env `HNSW_EF_SEARCH`, default 80): higher = better recall, slower. Set per workload; applied with `SET LOCAL` so it never leaks across pooled connections.
-- **`hnsw.iterative_scan = relaxed_order`** (pgvector 0.8+): when a `WHERE document_id = X` filter discards ANN candidates, Postgres keeps scanning the graph instead of returning fewer than LIMIT rows.
-- **Recall check**: compare `mode=semantic` vs exact scan (`SET enable_indexscan=off` on a session) on a sample of queries before raising `ef_search`.
-- **Scaling past ~10M chunks**: partition `chunks` by `document_id` hash or tenant, one HNSW per partition; or move coarse stage entirely to the bit index.
-- Server-level (postgresql.conf): `shared_buffers` 25% RAM, `effective_cache_size` 75%, `work_mem` 64MB for the RRF CTEs, `jit = off` for short OLTP-style queries.
-
-## Files
-
-- `src/initDb.js` — schema, generated columns, all three indexes, storage/autovacuum tuning
-- `src/server.js` — ingest, three retrieval modes, embedding cache, stats endpoint
-- `src/embeddings.js` — chunking + batched OpenAI embeddings
-
-## Authentication (JWT)
-
-All `/api/*` routes require `Authorization: Bearer <jwt>`. Scope model:
-
-| Route | Required scope |
-|---|---|
-| `POST /api/documents` (ingest) | `rag:write` |
-| `DELETE /api/documents/:id` | `rag:write` |
-| `POST /api/query`, `GET /api/documents`, `GET /api/stats` | `rag:read` |
-| `GET /health` | none |
-
-Verification (`src/auth.js`):
-- **Algorithm pinned** via `algorithms: [JWT_ALG]` — blocks `alg:none` and HS/RS confusion attacks
-- `iss` + `aud` + `exp` enforced, 5s clock tolerance
-- 401 (`WWW-Authenticate` header) for missing/invalid/expired tokens; **403** for valid token without the required scope
-- `req.auth = { sub, scope, jti, claims }` available downstream for per-tenant filtering/audit
-
-Modes:
-- **HS256** (default): set `JWT_SECRET` (32+ random chars)
-- **RS256**: `JWT_ALG=RS256` + `JWT_PUBLIC_KEY` (PEM, `\n`-escaped) — verify-only; sign with your private key / IdP
-
-Mint test tokens:
+## External API examples
 
 ```bash
-npm run token -- ingest-service "rag:read rag:write" 24h
+TOKEN=$(npm run -s token -- svc "rag:read rag:write" 1h | sed -n 3p)
+
 curl -X POST localhost:3000/api/documents \
-  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
-  -d '{"title":"...","text":"..."}'
-```
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"PRD overview","text":"All existence is patterned or random..."}'
 
-Tested: missing token → 401, malformed → 401, expired → 401, read-only scope on ingest → 403, write scope → 200.
-
-## Next.js UI (`web/`)
-
-Two surfaces on port 3001, proxying the Express API (3000):
-
-- **`/` Chat** — RAG Q&A with mode switcher (hybrid / twostage / semantic), source chips with similarity %, retrieval-latency stats, embedding-cache indicator
-- **`/admin` Admin panel** — gated by **secret key**: ingest form (title/source/text), document table with chunk counts and delete
-
-### Security model
-
-- Browser **never** sees `JWT_SECRET` or backend tokens. Next.js server routes mint **2-minute** scoped service JWTs (`rag:read` for chat, `rag:write` for ingest) per request.
-- Admin key travels in `x-admin-key` header (not URL — no log leakage) and is checked with **`crypto.timingSafeEqual`** over sha256 digests.
-- **Rotate the key by editing `ADMIN_SECRET` in `web/.env` and restarting** — old keys die instantly; nothing is stored in DB or browser.
-
-### Run
-
-```bash
-cd web
-npm install
-cp .env.example .env    # set JWT_SECRET (same as backend), ADMIN_SECRET, RAG_API_URL
-npm run dev             # http://localhost:3001
+curl -X POST localhost:3000/api/query \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"question":"What is the core claim?","mode":"hybrid"}'
 ```

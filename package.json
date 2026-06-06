@@ -1,20 +1,21 @@
 {
-  "name": "pgvector-rag-api",
-  "version": "1.0.0",
-  "description": "Node.js + PostgreSQL (pgvector) RAG API using OpenAI embeddings",
+  "name": "pgvector-rag-next",
+  "version": "2.0.0",
+  "private": true,
   "type": "module",
-  "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
-    "db:init": "node src/initDb.js",
-    "token": "node scripts/issueToken.js"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:init": "node scripts/initDb.mjs",
+    "token": "node scripts/issueToken.mjs"
   },
   "dependencies": {
-    "dotenv": "^16.6.1",
-    "express": "^4.22.2",
-    "jsonwebtoken": "^9.0.3",
+    "next": "^14.2.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "pg": "^8.12.0",
     "openai": "^4.56.0",
-    "pg": "^8.12.0"
+    "jsonwebtoken": "^9.0.2"
   }
 }
