@@ -103,3 +103,25 @@ curl -X POST localhost:3000/api/documents \
 ```
 
 Tested: missing token → 401, malformed → 401, expired → 401, read-only scope on ingest → 403, write scope → 200.
+
+## Next.js UI (`web/`)
+
+Two surfaces on port 3001, proxying the Express API (3000):
+
+- **`/` Chat** — RAG Q&A with mode switcher (hybrid / twostage / semantic), source chips with similarity %, retrieval-latency stats, embedding-cache indicator
+- **`/admin` Admin panel** — gated by **secret key**: ingest form (title/source/text), document table with chunk counts and delete
+
+### Security model
+
+- Browser **never** sees `JWT_SECRET` or backend tokens. Next.js server routes mint **2-minute** scoped service JWTs (`rag:read` for chat, `rag:write` for ingest) per request.
+- Admin key travels in `x-admin-key` header (not URL — no log leakage) and is checked with **`crypto.timingSafeEqual`** over sha256 digests.
+- **Rotate the key by editing `ADMIN_SECRET` in `web/.env` and restarting** — old keys die instantly; nothing is stored in DB or browser.
+
+### Run
+
+```bash
+cd web
+npm install
+cp .env.example .env    # set JWT_SECRET (same as backend), ADMIN_SECRET, RAG_API_URL
+npm run dev             # http://localhost:3001
+```
