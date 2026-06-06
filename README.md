@@ -1,6 +1,6 @@
-# pgvector RAG — Unified Next.js App
+# Knowledge Vault — RAG Platform
+Chat with your own knowledge base. Documents are chunked, embedded, and indexed in PostgreSQL with pgvector; questions are answered by an LLM grounded strictly in retrieved context, with cited sources and similarity scores. Includes a secret-key admin panel for managing the corpus and a JWT-protected API for external services. Hybrid retrieval (semantic + full-text with RRF fusion) tuned for production scale.
 
-Single Next.js application: **UI + full RAG API in one process**. No separate Express service.
 
 ```
 app/
